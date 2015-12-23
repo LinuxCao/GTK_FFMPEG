@@ -27,7 +27,7 @@
 
 #include <semaphore.h>
 #include <pthread.h>
-#include "SDL/SDL.h"
+#include "SDL2/SDL.h"  
 
   
 static GtkWidget *main_window;  
@@ -126,6 +126,14 @@ void* playeropen(char *file)
     uint32_t       i        = 0;
 	uint8_t *out_buffer;  
 	struct SwsContext *img_convert_ctx;  
+	int ret, got_picture;  
+	
+	//SDL---------------------------  
+    int screen_w=0,screen_h=0;  
+    SDL_Window *screen;   
+    SDL_Renderer* sdlRenderer;  
+    SDL_Texture* sdlTexture;  
+    SDL_Rect sdlRect; 
 
 	g_print("playeropen\n"); 
     // av register all
@@ -268,11 +276,88 @@ void* playeropen(char *file)
 	}   
 	else
 	{
-		printf( "SDL_Init success\n");   
+		printf( "SDL: SDL_Init success\n");   
 	}
-		
+	screen_w = player->pVideoCodecContext->width;  
+    screen_h = player->pVideoCodecContext->height; 
+	//SDL 2.0 Support for multiple windows  
+    screen = SDL_CreateWindow("ffmpeg player's Window", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,  
+        screen_w, screen_h,  
+        SDL_WINDOW_OPENGL); 
+	if(!screen)
+	{    
+        printf("SDL: could not create window - exiting:%s\n",SDL_GetError());    
+        return -1;  
+    }  
+	else
+	{
+	    printf("SDL: SDL_CreateWindow success\n");    
+	}
+	sdlRenderer = SDL_CreateRenderer(screen, -1, 0);  
+	if(!sdlRenderer)
+	{    
+        printf("SDL: could not create Renderer - exiting:%s\n",SDL_GetError());    
+        return -1;  
+    }  
+	else
+	{
+	    printf("SDL: SDL_CreateRenderer success\n");    
+	}	
+    //IYUV: Y + U + V  (3 planes)  
+    //YV12: Y + V + U  (3 planes)  
+    sdlTexture = SDL_CreateTexture(sdlRenderer, 
+								   SDL_PIXELFORMAT_IYUV, 
+								   SDL_TEXTUREACCESS_STREAMING,
+								   player->pVideoCodecContext->width,
+								   player->pVideoCodecContext->height);
+	if(!sdlTexture)
+	{    
+        printf("SDL: could not create Texture - exiting:%s\n",SDL_GetError());    
+        return -1;  
+    }  
+	else
+	{
+	    printf("SDL: SDL_CreateTexture success\n");    
+	}				
 
-		
+	sdlRect.x=0;  
+    sdlRect.y=0;  
+    sdlRect.w=screen_w;  
+    sdlRect.h=screen_h;  
+
+	//SDL End----------------------  
+    while(av_read_frame(player->pAVFormatContext, packet)>=0)
+	{  
+        if(packet->stream_index == player->iVideoStreamIndex )
+		{  
+            ret = avcodec_decode_video2(player->pVideoCodecContext, pFrame, &got_picture, packet);  
+            if(ret < 0)
+			{  
+                printf("avcodec_decode_video2 Error.\n");  
+                return -1;  
+            }  
+            if(got_picture)
+			{  
+				//printf("avcodec_decode_video2 success.\n");  
+                sws_scale(img_convert_ctx, (const uint8_t* const*)pFrame->data, pFrame->linesize, 0, player->pVideoCodecContext->height,   
+                    pFrameYUV->data, pFrameYUV->linesize);  
+					
+				//SDL--------------------------- 
+				SDL_UpdateYUVTexture(sdlTexture, &sdlRect,  
+									 pFrameYUV->data[0], pFrameYUV->linesize[0],  
+									 pFrameYUV->data[1], pFrameYUV->linesize[1],  
+									 pFrameYUV->data[2], pFrameYUV->linesize[2]);  
+				SDL_RenderClear( sdlRenderer );  
+				SDL_RenderCopy( sdlRenderer, sdlTexture,  NULL, &sdlRect); 
+				SDL_RenderPresent( sdlRenderer );   
+				//SDL End-----------------------  
+                //Delay 40ms  
+                SDL_Delay(40); 
+			}
+		}
+		av_free_packet(packet);  
+    }  	
+  
 	return player;
 	error_handler:
 		//playerclose(player);
