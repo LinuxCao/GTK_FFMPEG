@@ -59,11 +59,11 @@ void pktqueue_destroy(PKTQUEUE *ppq)
     if (ppq->vpkts) free(ppq->vpkts);
 
     // close
-    //sem_destroy(&(ppq->fsemr));
-    //sem_destroy(&(ppq->asemr));
-    //sem_destroy(&(ppq->asemw));
-    //sem_destroy(&(ppq->vsemr));
-    //sem_destroy(&(ppq->vsemw));
+    sem_destroy(&(ppq->fsemr));
+    sem_destroy(&(ppq->asemr));
+    sem_destroy(&(ppq->asemw));
+    sem_destroy(&(ppq->vsemr));
+    sem_destroy(&(ppq->vsemw));
 
     // clear members
     memset(ppq, 0, sizeof(PKTQUEUE));
@@ -84,11 +84,11 @@ gboolean pktqueue_create(PKTQUEUE *ppq)
     ppq->fpkts = (AVPacket**)malloc(ppq->fsize * sizeof(AVPacket*));
     ppq->apkts = (AVPacket**)malloc(ppq->asize * sizeof(AVPacket*));
     ppq->vpkts = (AVPacket**)malloc(ppq->vsize * sizeof(AVPacket*));
-    //sem_init(&(ppq->fsemr), 0, ppq->fsize);
-    //sem_init(&(ppq->asemr), 0, 0         );
-    //sem_init(&(ppq->asemw), 0, ppq->asize);
-    //sem_init(&(ppq->vsemr), 0, 0         );
-    //sem_init(&(ppq->vsemw), 0, ppq->vsize);
+    sem_init(&(ppq->fsemr), 0, ppq->fsize);
+    sem_init(&(ppq->asemr), 0, 0         );
+    sem_init(&(ppq->asemw), 0, ppq->asize);
+    sem_init(&(ppq->vsemr), 0, 0         );
+    sem_init(&(ppq->vsemw), 0, ppq->vsize);
 
     // check invalid
     if (!ppq->bpkts || !ppq->fpkts || !ppq->apkts || !ppq->vpkts) {
@@ -137,7 +137,7 @@ void* playeropen(char *file)
     memset(player, 0, sizeof(PLAYER));
 	
 	// create packet queue
-    //pktqueue_create(&(player->PacketQueue));
+    pktqueue_create(&(player->PacketQueue));
 	
 	// open input file
 	if (avformat_open_input(&(player->pAVFormatContext), file, NULL, 0) != 0)
@@ -260,6 +260,16 @@ void* playeropen(char *file)
 	printf("-------------------------------------------------\n"); 
 	img_convert_ctx = sws_getContext(width, height, vformat,   
         width, height, PIX_FMT_YUV420P, SWS_BICUBIC, NULL, NULL, NULL);   
+		
+	if(SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_TIMER)) 
+	{    
+		printf( "Could not initialize SDL - %s\n", SDL_GetError());   
+		return -1;  
+	}   
+	else
+	{
+		printf( "SDL_Init success\n");   
+	}
 		
 
 		

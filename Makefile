@@ -12,8 +12,8 @@ LIBS=  libavcodec libavdevice libavfilter libavformat libavutil libswresample li
 
 
 # -O2
-CFLAGS=`pkg-config --cflags ${LIBS}` -g -Wall
-LDFLAGS=`pkg-config --libs ${LIBS}`  -g -Wall
+CFLAGS=`pkg-config --cflags ${LIBS}` -g -Wall -l SDL -lpthread
+LDFLAGS=`pkg-config --libs ${LIBS}`  -g -Wall -l SDL -lpthread
 #
 all: ${PROG_NAME}
 ${PROG_NAME}:${OBJS}
