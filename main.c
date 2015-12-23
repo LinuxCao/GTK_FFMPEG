@@ -8,6 +8,26 @@
 //#include <gst/interfaces/xoverlay.h>  
 #include <string.h>  
 #include "main.h"  
+
+#include <libavcodec/avcodec.h>
+#include <libavformat/avformat.h>
+#include <libswscale/swscale.h>
+#include <libswresample/swresample.h>
+#include <libavutil/avstring.h>
+#include <libavutil/opt.h>
+#include <libavdevice/avdevice.h>
+
+#include <libavformat/avio.h>
+#include "libavutil/audio_fifo.h"
+#include "libavutil/avassert.h"
+#include "libavutil/frame.h"
+#include "libavutil/opt.h"
+#include "libavutil/mem.h"
+#include "libavutil/avstring.h"
+
+#include <semaphore.h>
+#include <pthread.h>
+
   
 static GtkWidget *main_window;  
 static GtkWidget *play_button;  
@@ -26,9 +46,212 @@ static GtkWidget *video_output;
 static char *current_filename = NULL;  
 gboolean no_seek = FALSE;  
 
-  
- 
+// 全局变量定义
+static void *g_hplayer = NULL;
 
+void pktqueue_destroy(PKTQUEUE *ppq)
+{
+    // free
+    if (ppq->bpkts) free(ppq->bpkts);
+    if (ppq->fpkts) free(ppq->fpkts);
+    if (ppq->apkts) free(ppq->apkts);
+    if (ppq->vpkts) free(ppq->vpkts);
+
+    // close
+    //sem_destroy(&(ppq->fsemr));
+    //sem_destroy(&(ppq->asemr));
+    //sem_destroy(&(ppq->asemw));
+    //sem_destroy(&(ppq->vsemr));
+    //sem_destroy(&(ppq->vsemw));
+
+    // clear members
+    memset(ppq, 0, sizeof(PKTQUEUE));
+}
+
+// 函数实现
+gboolean pktqueue_create(PKTQUEUE *ppq)
+{
+    int i;
+
+    // default size
+    if (ppq->asize == 0) ppq->asize = DEF_PKT_QUEUE_ASIZE;
+    if (ppq->vsize == 0) ppq->vsize = DEF_PKT_QUEUE_VSIZE;
+    ppq->fsize = ppq->asize + ppq->vsize;
+
+    // alloc buffer & semaphore
+    ppq->bpkts = (AVPacket* )malloc(ppq->fsize * sizeof(AVPacket ));
+    ppq->fpkts = (AVPacket**)malloc(ppq->fsize * sizeof(AVPacket*));
+    ppq->apkts = (AVPacket**)malloc(ppq->asize * sizeof(AVPacket*));
+    ppq->vpkts = (AVPacket**)malloc(ppq->vsize * sizeof(AVPacket*));
+    //sem_init(&(ppq->fsemr), 0, ppq->fsize);
+    //sem_init(&(ppq->asemr), 0, 0         );
+    //sem_init(&(ppq->asemw), 0, ppq->asize);
+    //sem_init(&(ppq->vsemr), 0, 0         );
+    //sem_init(&(ppq->vsemw), 0, ppq->vsize);
+
+    // check invalid
+    if (!ppq->bpkts || !ppq->fpkts || !ppq->apkts || !ppq->vpkts) {
+        pktqueue_destroy(ppq);
+        return FALSE;
+    }
+
+    // clear packets
+    memset(ppq->bpkts, 0, ppq->fsize * sizeof(AVPacket ));
+    memset(ppq->apkts, 0, ppq->asize * sizeof(AVPacket*));
+    memset(ppq->vpkts, 0, ppq->vsize * sizeof(AVPacket*));
+
+    // init fpkts
+    for (i=0; i<ppq->fsize; i++) {
+        ppq->fpkts[i] = &(ppq->bpkts[i]);
+    }
+    return TRUE;
+}
+
+  
+ // 函数实现
+void* playeropen(char *file)
+{
+    PLAYER        *player   = NULL;
+    AVCodec       *pAVCodec = NULL;
+    int            vformat  = 0;
+    int            width    = 0;
+    int            height   = 0;
+    AVRational     vrate    = {1, 1};
+    uint64_t       alayout  = 0;
+    int            aformat  = 0;
+    int            arate    = 0;
+    uint32_t       i        = 0;
+
+	g_print("playeropen\n"); 
+    // av register all
+	g_print("av_register_all success\n"); 
+    av_register_all();
+	
+	// alloc player context
+    player = (PLAYER*)malloc(sizeof(PLAYER));
+    memset(player, 0, sizeof(PLAYER));
+	
+	// create packet queue
+    //pktqueue_create(&(player->PacketQueue));
+	
+	// open input file
+	if (avformat_open_input(&(player->pAVFormatContext), file, NULL, 0) != 0)
+	{
+		goto error_handler;
+	}
+	else
+	{
+		g_print("avformat_open_input success\n"); 
+	}
+	
+	// find stream info
+    if (avformat_find_stream_info(player->pAVFormatContext, NULL) < 0) {
+        goto error_handler;
+    }
+	else
+	{
+		g_print("avformat_find_stream_info success\n"); 
+	}
+	
+	// get video & audio codec context
+	g_print("get video & audio codec context\n"); 
+	player->iAudioStreamIndex = -1;
+	player->iVideoStreamIndex = -1;
+	for (i=0; i<player->pAVFormatContext->nb_streams; i++)
+	{
+		switch (player->pAVFormatContext->streams[i]->codec->codec_type)
+		{
+			case AVMEDIA_TYPE_AUDIO:
+				g_print("get video & audio codec context:AVMEDIA_TYPE_AUDIO\n");
+				g_print("get video & audio codec context:player->iAudioStreamIndex  = %d\n",i);
+				player->iAudioStreamIndex  = i;
+				player->pAudioCodecContext = player->pAVFormatContext->streams[i]->codec;
+				player->dAudioTimeBase     = av_q2d(player->pAVFormatContext->streams[i]->time_base) * 1000;
+			break;
+
+			case AVMEDIA_TYPE_VIDEO:
+				g_print("get video & audio codec context:AVMEDIA_TYPE_VIDEO\n");
+				g_print("get video & audio codec context:player->iVideoStreamIndex  = %d\n",i);
+				player->iVideoStreamIndex  = i;
+				player->pVideoCodecContext = player->pAVFormatContext->streams[i]->codec;
+				player->dVideoTimeBase     = av_q2d(player->pAVFormatContext->streams[i]->time_base) * 1000;
+				vrate = player->pAVFormatContext->streams[i]->r_frame_rate;
+			break;
+			default:
+				break;
+		}
+	}
+	
+	// open audio codec
+	g_print("open audio codec\n"); 
+    if (player->iAudioStreamIndex != -1)
+    {
+        pAVCodec = avcodec_find_decoder(player->pAudioCodecContext->codec_id);
+        if (pAVCodec)
+        {
+			g_print("avcodec_find_decoder  audio codec success\n"); 
+            if (avcodec_open2(player->pAudioCodecContext, pAVCodec, NULL) < 0)
+            {
+                player->iAudioStreamIndex = -1;
+            }
+			else
+			{
+				g_print("avcodec_open2  audio codec success\n"); 
+			}
+        }
+        else player->iAudioStreamIndex = -1;
+    }
+
+	 // open video codec
+	g_print("open video codec\n"); 
+    if (player->iVideoStreamIndex != -1)
+    {
+        pAVCodec = avcodec_find_decoder(player->pVideoCodecContext->codec_id);
+        if (pAVCodec)
+        {
+			g_print("avcodec_find_decoder  video codec success\n"); 
+            if (avcodec_open2(player->pVideoCodecContext, pAVCodec, NULL) < 0)
+            {
+                player->iVideoStreamIndex = -1;
+            }
+			else
+			{
+				g_print("avcodec_open2  video codec success\n"); 
+			}
+        }
+        else player->iVideoStreamIndex = -1;
+    }
+	
+	// for video
+    if (player->iVideoStreamIndex != -1)
+    {
+		vformat = player->pVideoCodecContext->pix_fmt;
+		width   = player->pVideoCodecContext->width;
+		height  = player->pVideoCodecContext->height;
+		g_print("player->pVideoCodecContext->pix_fmt = %d\n",vformat);
+		g_print("player->pVideoCodecContext->width = %d\n",width);
+		g_print("player->pVideoCodecContext->height = %d\n",height);
+    }
+
+	// for audio
+    if (player->iVideoStreamIndex != -1)
+    {
+		alayout = player->pAudioCodecContext->channel_layout;
+        aformat = player->pAudioCodecContext->sample_fmt;
+        arate   = player->pAudioCodecContext->sample_rate;
+		g_print("player->pAudioCodecContext->channel_layout = %lu\n",alayout);
+		g_print("player->pAudioCodecContext->sample_fmt = %d\n",aformat);
+		g_print("player->pAudioCodecContext->sample_rate = %d\n",arate);
+    }
+		
+	return player;
+	error_handler:
+		//playerclose(player);
+		return NULL;
+}
+
+ 
+ 
 // 打开文件  
 static void file_open(GtkAction *action)  
 {  
@@ -40,17 +263,24 @@ static void file_open(GtkAction *action)
         GTK_STOCK_OPEN, GTK_RESPONSE_ACCEPT,  
         NULL);  
   
-    if (gtk_dialog_run(GTK_DIALOG(file_chooser)) == GTK_RESPONSE_ACCEPT) {  
+    if (gtk_dialog_run(GTK_DIALOG(file_chooser)) == GTK_RESPONSE_ACCEPT) 
+	{  
         char *filename;  
         filename = gtk_file_chooser_get_uri(GTK_FILE_CHOOSER(file_chooser));  
         // g_signal_emit_by_name(G_OBJECT(stop_button), "clicked");  
         if (current_filename) g_free(current_filename);  
         current_filename = filename;  
-        if (load_file(filename))  
-            gtk_widget_set_sensitive(GTK_WIDGET(play_button), TRUE);  
-    }  
-  
-    gtk_widget_destroy(file_chooser);  
+
+		// player open file
+		g_hplayer = playeropen(current_filename);
+		if (g_hplayer)
+		{
+			//playerplay(g_hplayer);
+			gtk_widget_set_sensitive(GTK_WIDGET(play_button), TRUE);  
+			gtk_widget_destroy(file_chooser);  
+		}
+
+	}
 }  
 // 退出  
 static void file_quit(GtkAction *action)  
@@ -279,12 +509,14 @@ static gboolean build_gstreamer_pipeline(const gchar *uri)
    return TRUE;
 }  
 */
+/*
 // load file to play  
 gboolean load_file(const gchar *uri)  
 {  
 	g_print("load_file\n"); 
 	return TRUE;
 }  
+*/
 /*
 static gboolean update_time_callback(GstElement *pipeline)  
 {  

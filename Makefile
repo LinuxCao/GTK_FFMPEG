@@ -1,18 +1,19 @@
 CC= gcc
-PROG_NAME= ffmpeg
-INCS= main.h
-SRCS= main.c
+PROG_NAME= ffpaly
+INCS= .
+#利用wildcard函数产生一个所有以'.c' 结尾的文件的列表，然后存入SRCS中
+SRCS= $(wildcard *.c)
 
 #从xx.c 文件得到 xx.o 文件
 OBJS=${SRCS:.c=.o}
 
-#编译GTK程序时要用到的库
-LIBS=gtk+-2.0
-#---- 用户修改区域 结束
+#编译GTK和FFMPEG程序时要用到的库
+LIBS= libavcodec libavdevice libavfilter libavformat libavutil libswresample libswscale  gtk+-2.0  
+
 
 # -O2
 CFLAGS=`pkg-config --cflags ${LIBS}` -g -Wall
-LDFLAGS=`pkg-config --libs ${LIBS}`   -g -Wall
+LDFLAGS=`pkg-config --libs ${LIBS}`  -g -Wall
 #
 all: ${PROG_NAME}
 ${PROG_NAME}:${OBJS}
