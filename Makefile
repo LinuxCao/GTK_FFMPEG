@@ -8,7 +8,7 @@ SRCS= $(wildcard *.c)
 OBJS=${SRCS:.c=.o}
 
 #编译GTK和FFMPEG程序时要用到的库
-LIBS= libavcodec libavdevice libavfilter libavformat libavutil libswresample libswscale  gtk+-2.0  
+LIBS=  libavcodec libavdevice libavfilter libavformat libavutil libswresample libswscale gtk+-2.0  
 
 
 # -O2

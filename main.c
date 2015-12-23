@@ -27,6 +27,7 @@
 
 #include <semaphore.h>
 #include <pthread.h>
+#include "SDL/SDL.h"
 
   
 static GtkWidget *main_window;  
@@ -113,6 +114,8 @@ void* playeropen(char *file)
 {
     PLAYER        *player   = NULL;
     AVCodec       *pAVCodec = NULL;
+	AVFrame *pFrame,*pFrameYUV;  
+	AVPacket *packet;  
     int            vformat  = 0;
     int            width    = 0;
     int            height   = 0;
@@ -121,6 +124,8 @@ void* playeropen(char *file)
     int            aformat  = 0;
     int            arate    = 0;
     uint32_t       i        = 0;
+	uint8_t *out_buffer;  
+	struct SwsContext *img_convert_ctx;  
 
 	g_print("playeropen\n"); 
     // av register all
@@ -243,6 +248,20 @@ void* playeropen(char *file)
 		g_print("player->pAudioCodecContext->sample_fmt = %d\n",aformat);
 		g_print("player->pAudioCodecContext->sample_rate = %d\n",arate);
     }
+	
+	pFrame=av_frame_alloc();  
+    pFrameYUV=av_frame_alloc();
+	out_buffer=(uint8_t *)av_malloc(avpicture_get_size(PIX_FMT_YUV420P, width, height));  
+	avpicture_fill((AVPicture *)pFrameYUV, out_buffer, PIX_FMT_YUV420P, width, height);  
+	packet=(AVPacket *)av_malloc(sizeof(AVPacket));  
+	//Output Info-----------------------------  
+	printf("--------------- File Information ----------------\n");  
+	av_dump_format(player->pAVFormatContext,0,file,0);  
+	printf("-------------------------------------------------\n"); 
+	img_convert_ctx = sws_getContext(width, height, vformat,   
+        width, height, PIX_FMT_YUV420P, SWS_BICUBIC, NULL, NULL, NULL);   
+		
+
 		
 	return player;
 	error_handler:
