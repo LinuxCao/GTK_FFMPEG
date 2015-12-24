@@ -50,6 +50,39 @@ gboolean no_seek = FALSE;
 // 全局变量定义
 static void *g_hplayer = NULL;
 
+//Refresh Event  
+#define SFM_REFRESH_EVENT  (SDL_USEREVENT + 1)  
+  
+#define SFM_BREAK_EVENT  (SDL_USEREVENT + 2)  
+  
+int thread_exit=0;  
+int thread_pause=0;  
+pthread_t pthread_player_open;
+int sfp_refresh_thread(void *opaque)
+{  
+    thread_exit=0;  
+    thread_pause=0;  
+  
+    while (!thread_exit) 
+	{  
+        if(!thread_pause)
+		{  
+            SDL_Event event;  
+            event.type = SFM_REFRESH_EVENT;  
+            SDL_PushEvent(&event);  
+        }  
+        SDL_Delay(25);  
+    }  
+    thread_exit=0;  
+    thread_pause=0;  
+    //Break  
+    SDL_Event event;  
+    event.type = SFM_BREAK_EVENT;  
+    SDL_PushEvent(&event);  
+  
+    return 0;  
+}  
+
 void pktqueue_destroy(PKTQUEUE *ppq)
 {
     // free
@@ -134,6 +167,8 @@ void* playeropen(char *file)
     SDL_Renderer* sdlRenderer;  
     SDL_Texture* sdlTexture;  
     SDL_Rect sdlRect; 
+	SDL_Thread *video_tid;  
+    SDL_Event event;  
 
 	g_print("playeropen\n"); 
     // av register all
@@ -272,7 +307,7 @@ void* playeropen(char *file)
 	if(SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_TIMER)) 
 	{    
 		printf( "Could not initialize SDL - %s\n", SDL_GetError());   
-		return -1;  
+		return NULL;  
 	}   
 	else
 	{
@@ -287,7 +322,7 @@ void* playeropen(char *file)
 	if(!screen)
 	{    
         printf("SDL: could not create window - exiting:%s\n",SDL_GetError());    
-        return -1;  
+        return NULL;  
     }  
 	else
 	{
@@ -297,7 +332,7 @@ void* playeropen(char *file)
 	if(!sdlRenderer)
 	{    
         printf("SDL: could not create Renderer - exiting:%s\n",SDL_GetError());    
-        return -1;  
+        return NULL;  
     }  
 	else
 	{
@@ -313,7 +348,7 @@ void* playeropen(char *file)
 	if(!sdlTexture)
 	{    
         printf("SDL: could not create Texture - exiting:%s\n",SDL_GetError());    
-        return -1;  
+        return NULL;  
     }  
 	else
 	{
@@ -324,40 +359,74 @@ void* playeropen(char *file)
     sdlRect.y=0;  
     sdlRect.w=screen_w;  
     sdlRect.h=screen_h;  
-
-	//SDL End----------------------  
-    while(av_read_frame(player->pAVFormatContext, packet)>=0)
+	
+	video_tid = SDL_CreateThread(sfp_refresh_thread,NULL,NULL);  
+	//------------SDL End------------  
+    //Event Loop  
+	
+	for (;;) 
 	{  
-        if(packet->stream_index == player->iVideoStreamIndex )
+        //Wait  
+        SDL_WaitEvent(&event);  
+        if(event.type==SFM_REFRESH_EVENT)
 		{  
-            ret = avcodec_decode_video2(player->pVideoCodecContext, pFrame, &got_picture, packet);  
-            if(ret < 0)
+            //------------------------------  
+            if(av_read_frame(player->pAVFormatContext, packet)>=0)
 			{  
-                printf("avcodec_decode_video2 Error.\n");  
-                return -1;  
+                if(packet->stream_index==player->iVideoStreamIndex)
+				{  
+                    ret = avcodec_decode_video2(player->pVideoCodecContext, pFrame, &got_picture, packet);  
+                    if(ret < 0)
+					{  
+                        printf("avcodec_decode_video2 Error.\n");  
+                        return NULL;  
+                    }  
+                    if(got_picture)
+					{  
+                        sws_scale(img_convert_ctx, (const uint8_t* const*)pFrame->data, pFrame->linesize, 0, player->pVideoCodecContext->height, pFrameYUV->data, pFrameYUV->linesize);  
+                        //SDL---------------------------  
+                        SDL_UpdateTexture( sdlTexture, NULL, pFrameYUV->data[0], pFrameYUV->linesize[0] );    
+                        SDL_RenderClear( sdlRenderer );    
+                        //SDL_RenderCopy( sdlRenderer, sdlTexture, &sdlRect, &sdlRect );    
+                        SDL_RenderCopy( sdlRenderer, sdlTexture, NULL, NULL);    
+                        SDL_RenderPresent( sdlRenderer );    
+                        //SDL End-----------------------  
+                    }  
+                }  
+                av_free_packet(packet);  
+            }
+			else
+			{  
+                //Exit Thread  
+                thread_exit=1;  
             }  
-            if(got_picture)
-			{  
-				//printf("avcodec_decode_video2 success.\n");  
-                sws_scale(img_convert_ctx, (const uint8_t* const*)pFrame->data, pFrame->linesize, 0, player->pVideoCodecContext->height,   
-                    pFrameYUV->data, pFrameYUV->linesize);  
-					
-				//SDL--------------------------- 
-				SDL_UpdateYUVTexture(sdlTexture, &sdlRect,  
-									 pFrameYUV->data[0], pFrameYUV->linesize[0],  
-									 pFrameYUV->data[1], pFrameYUV->linesize[1],  
-									 pFrameYUV->data[2], pFrameYUV->linesize[2]);  
-				SDL_RenderClear( sdlRenderer );  
-				SDL_RenderCopy( sdlRenderer, sdlTexture,  NULL, &sdlRect); 
-				SDL_RenderPresent( sdlRenderer );   
-				//SDL End-----------------------  
-                //Delay 40ms  
-                SDL_Delay(40); 
-			}
-		}
-		av_free_packet(packet);  
-    }  	
+        }
+		else if(event.type==SDL_KEYDOWN)
+		{  
+            //Pause  
+            if(event.key.keysym.sym==SDLK_SPACE)  
+                thread_pause=!thread_pause;  
+        }
+		else if(event.type==SDL_QUIT)
+		{  
+            thread_exit=1;  
+        }
+		else if(event.type==SFM_BREAK_EVENT)
+		{  
+            break;  
+        }  
   
+    }  
+	sws_freeContext(img_convert_ctx);  
+	
+    printf("SDL: SDL_Quit success\n"); 
+    SDL_Quit();  
+    //--------------  
+    av_frame_free(&pFrameYUV);  
+    av_frame_free(&pFrame);  
+	avcodec_close(player->pVideoCodecContext);  
+    avformat_close_input(&player->pAVFormatContext);  
+	
 	return player;
 	error_handler:
 		//playerclose(player);
@@ -379,22 +448,17 @@ static void file_open(GtkAction *action)
   
     if (gtk_dialog_run(GTK_DIALOG(file_chooser)) == GTK_RESPONSE_ACCEPT) 
 	{  
-        char *filename;  
-        filename = gtk_file_chooser_get_uri(GTK_FILE_CHOOSER(file_chooser));  
-        // g_signal_emit_by_name(G_OBJECT(stop_button), "clicked");  
-        if (current_filename) g_free(current_filename);  
-        current_filename = filename;  
+		char *filename;  
+		filename = gtk_file_chooser_get_uri(GTK_FILE_CHOOSER(file_chooser));  
+		// g_signal_emit_by_name(G_OBJECT(stop_button), "clicked");  
+		if (current_filename) g_free(current_filename);  
+		current_filename = filename;  
 
-		// player open file
-		g_hplayer = playeropen(current_filename);
-		if (g_hplayer)
-		{
-			//playerplay(g_hplayer);
-			gtk_widget_set_sensitive(GTK_WIDGET(play_button), TRUE);  
-			gtk_widget_destroy(file_chooser);  
-		}
-
+		// player open file pthread
+		pthread_create(&pthread_player_open,NULL,playeropen,current_filename);
+		gtk_widget_set_sensitive(GTK_WIDGET(play_button), TRUE);  
 	}
+	gtk_widget_destroy(file_chooser);
 }  
 // 退出  
 static void file_quit(GtkAction *action)  
