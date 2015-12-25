@@ -25,6 +25,7 @@
 #include "libavutil/opt.h"
 #include "libavutil/mem.h"
 #include "libavutil/avstring.h"
+#include "libavutil/samplefmt.h"
 
 // 常量定义
 #define DEF_PKT_QUEUE_ASIZE   50

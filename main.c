@@ -24,6 +24,7 @@
 #include "libavutil/opt.h"
 #include "libavutil/mem.h"
 #include "libavutil/avstring.h"
+#include "libavutil/samplefmt.h"
 
 #include <semaphore.h>
 #include <pthread.h>
@@ -48,16 +49,47 @@ static char *current_filename = NULL;
 gboolean no_seek = FALSE;  
 
 // 全局变量定义
-static void *g_hplayer = NULL;
+//static void *g_hplayer = NULL;
 
 //Refresh Event  
 #define SFM_REFRESH_EVENT  (SDL_USEREVENT + 1)  
   
 #define SFM_BREAK_EVENT  (SDL_USEREVENT + 2)  
+
+//Output PCM  
+#define OUTPUT_PCM 1 
+#define USE_SDL 1  
+
+#define MAX_AUDIO_FRAME_SIZE 192000 // 1 second of 48khz 32bit audio  
   
 int thread_exit=0;  
 int thread_pause=0;  
 pthread_t pthread_player_open;
+
+//Buffer:  
+//|-----------|-------------|  
+//chunk-------pos---len-----|  
+static  Uint8  *audio_chunk;   
+static  Uint32  audio_len;   
+static  Uint8  *audio_pos;   
+  
+/* The audio function callback takes the following parameters:  
+ * stream: A pointer to the audio buffer to be filled  
+ * len: The length (in bytes) of the audio buffer  
+*/   
+void  fill_audio(void *udata,Uint8 *stream,int len){   
+    //SDL 2.0  
+    SDL_memset(stream, 0, len);  
+    if(audio_len==0)        /*  Only  play  if  we  have  data  left  */   
+            return;   
+    len=(len>audio_len?audio_len:len);   /*  Mix  as  much  data  as  possible  */   
+  
+    SDL_MixAudio(stream,audio_pos,len,SDL_MIX_MAXVOLUME);  
+    audio_pos += len;   
+    audio_len -= len;   
+}   
+//----------------- 
+
 int sfp_refresh_thread(void *opaque)
 {  
     thread_exit=0;  
@@ -71,7 +103,7 @@ int sfp_refresh_thread(void *opaque)
             event.type = SFM_REFRESH_EVENT;  
             SDL_PushEvent(&event);  
         }  
-        SDL_Delay(25);  
+        SDL_Delay(20);  
     }  
     thread_exit=0;  
     thread_pause=0;  
@@ -148,18 +180,24 @@ void* playeropen(char *file)
     PLAYER        *player   = NULL;
     AVCodec       *pAVCodec = NULL;
 	AVFrame *pFrame,*pFrameYUV;  
+	AVFrame *pFrame_a,*pFrameYUV_a;
 	AVPacket *packet;  
     int            vformat  = 0;
     int            width    = 0;
     int            height   = 0;
-    AVRational     vrate    = {1, 1};
+    //AVRational     vrate    = {1, 1};
     uint64_t       alayout  = 0;
     int            aformat  = 0;
     int            arate    = 0;
     uint32_t       i        = 0;
 	uint8_t *out_buffer;  
-	struct SwsContext *img_convert_ctx;  
-	int ret, got_picture;  
+	uint8_t *out_buffer_audio; 
+	struct SwsContext *img_convert_ctx;
+	struct SwrContext *au_convert_ctx; 
+	int ret, got_picture,got_picture_audio;  
+	FILE *pFile=NULL; 
+	int64_t in_channel_layout;  
+	int index = 0;  
 	
 	//SDL---------------------------  
     int screen_w=0,screen_h=0;  
@@ -167,8 +205,9 @@ void* playeropen(char *file)
     SDL_Renderer* sdlRenderer;  
     SDL_Texture* sdlTexture;  
     SDL_Rect sdlRect; 
-	SDL_Thread *video_tid;  
+	//SDL_Thread *video_tid;  
     SDL_Event event;  
+	SDL_AudioSpec wanted_spec;  
 
 	g_print("playeropen\n"); 
     // av register all
@@ -180,7 +219,7 @@ void* playeropen(char *file)
     memset(player, 0, sizeof(PLAYER));
 	
 	// create packet queue
-    pktqueue_create(&(player->PacketQueue));
+    //pktqueue_create(&(player->PacketQueue));
 	
 	// open input file
 	if (avformat_open_input(&(player->pAVFormatContext), file, NULL, 0) != 0)
@@ -223,7 +262,7 @@ void* playeropen(char *file)
 				player->iVideoStreamIndex  = i;
 				player->pVideoCodecContext = player->pAVFormatContext->streams[i]->codec;
 				player->dVideoTimeBase     = av_q2d(player->pAVFormatContext->streams[i]->time_base) * 1000;
-				vrate = player->pAVFormatContext->streams[i]->r_frame_rate;
+				//vrate = player->pAVFormatContext->streams[i]->r_frame_rate;
 			break;
 			default:
 				break;
@@ -290,20 +329,51 @@ void* playeropen(char *file)
 		g_print("player->pAudioCodecContext->channel_layout = %lu\n",alayout);
 		g_print("player->pAudioCodecContext->sample_fmt = %d\n",aformat);
 		g_print("player->pAudioCodecContext->sample_rate = %d\n",arate);
+		g_print("player->pAudioCodecContext->channels = %d\n",player->pAudioCodecContext->channels);
+	
     }
 	
+#if OUTPUT_PCM  
+    pFile=fopen("output.pcm", "wb");  
+#endif  
+
+	//init packet
+    packet=(AVPacket *)av_malloc(sizeof(AVPacket));  
+    av_init_packet(packet);  
+	
+	//init video Frame
 	pFrame=av_frame_alloc();  
     pFrameYUV=av_frame_alloc();
+	
+	//init audio Frame
+	pFrame_a = av_frame_alloc();
+    pFrameYUV_a = av_frame_alloc();
+	
+	//Out Audio Param  
+    uint64_t out_channel_layout=AV_CH_LAYOUT_STEREO;  
+    //nb_samples: AAC-1024 MP3-1152  
+    int out_nb_samples=player->pAudioCodecContext->frame_size;  
+    //AVSampleFormat out_sample_fmt=AV_SAMPLE_FMT_S16;  
+	int out_sample_fmt=1;
+    int out_sample_rate=44100;  
+    int out_channels=av_get_channel_layout_nb_channels(out_channel_layout);  
+	
+    //Out Audio Buffer Size  
+    int out_buffer_size=av_samples_get_buffer_size(NULL,out_channels ,out_nb_samples,out_sample_fmt, 1);  
+	out_buffer_audio=(uint8_t *)av_malloc(MAX_AUDIO_FRAME_SIZE*2);  
+	
 	out_buffer=(uint8_t *)av_malloc(avpicture_get_size(PIX_FMT_YUV420P, width, height));  
 	avpicture_fill((AVPicture *)pFrameYUV, out_buffer, PIX_FMT_YUV420P, width, height);  
-	packet=(AVPacket *)av_malloc(sizeof(AVPacket));  
+	
 	//Output Info-----------------------------  
 	printf("--------------- File Information ----------------\n");  
 	av_dump_format(player->pAVFormatContext,0,file,0);  
 	printf("-------------------------------------------------\n"); 
-	img_convert_ctx = sws_getContext(width, height, vformat,   
-        width, height, PIX_FMT_YUV420P, SWS_BICUBIC, NULL, NULL, NULL);   
-		
+
+  
+//SDL------------------  
+#if USE_SDL  
+    //Init  
 	if(SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_TIMER)) 
 	{    
 		printf( "Could not initialize SDL - %s\n", SDL_GetError());   
@@ -313,6 +383,41 @@ void* playeropen(char *file)
 	{
 		printf( "SDL: SDL_Init success\n");   
 	}
+    //SDL_AudioSpec  
+    wanted_spec.freq = out_sample_rate;   
+    wanted_spec.format = AUDIO_S16SYS;   
+    wanted_spec.channels = out_channels;   
+    wanted_spec.silence = 0;   
+    wanted_spec.samples = out_nb_samples;   
+    wanted_spec.callback = fill_audio;   
+    wanted_spec.userdata = player->pAudioCodecContext;   
+  
+    if (SDL_OpenAudio(&wanted_spec, NULL)<0)
+	{   
+        printf("can't open audio.\n");   
+        return NULL;   
+    }  
+	else
+	{
+		printf( "SDL: SDL_OpenAudio success\n");  
+	}
+#endif  
+
+	//FIX:Some Codec's Context Information is missing  
+	g_print("av_get_default_channel_layout\n");	
+    in_channel_layout=av_get_default_channel_layout(player->pAudioCodecContext->channels);
+	g_print("av_get_default_channel_layout:%lu\n",in_channel_layout);	
+	
+	//Swresample for audio
+	au_convert_ctx = swr_alloc();  
+    au_convert_ctx=swr_alloc_set_opts(au_convert_ctx,out_channel_layout, out_sample_fmt, out_sample_rate,  
+        in_channel_layout,player->pAudioCodecContext->sample_fmt , player->pAudioCodecContext->sample_rate,0, NULL);  
+    swr_init(au_convert_ctx);  
+	
+	//Swscale for video
+	img_convert_ctx = sws_getContext(width, height, vformat,   
+        width, height, PIX_FMT_YUV420P, SWS_BICUBIC, NULL, NULL, NULL);  
+
 	screen_w = player->pVideoCodecContext->width;  
     screen_h = player->pVideoCodecContext->height; 
 	//SDL 2.0 Support for multiple windows  
@@ -360,7 +465,7 @@ void* playeropen(char *file)
     sdlRect.w=screen_w;  
     sdlRect.h=screen_h;  
 	
-	video_tid = SDL_CreateThread(sfp_refresh_thread,NULL,NULL);  
+	SDL_CreateThread(sfp_refresh_thread,NULL,NULL);  
 	//------------SDL End------------  
     //Event Loop  
 	
@@ -393,6 +498,43 @@ void* playeropen(char *file)
                         //SDL End-----------------------  
                     }  
                 }  
+				else if(packet->stream_index==player->iAudioStreamIndex)
+				{  
+					ret = avcodec_decode_audio4( player->pAudioCodecContext, pFrame_a,&got_picture_audio, packet);  
+					if ( ret < 0 )
+					{  
+						printf("Error in decoding audio frame.\n");  
+						return NULL;  
+					}  
+					if ( got_picture_audio > 0 )
+					{  
+						swr_convert(au_convert_ctx,&out_buffer_audio, MAX_AUDIO_FRAME_SIZE,(const uint8_t **)pFrame_a->data , pFrame_a->nb_samples);  
+#if 0  
+						printf("index:%5d\t pts:%lld\t packet size:%d\n",index,packet->pts,packet->size);  
+#endif  
+  
+  
+#if OUTPUT_PCM  
+					//Write PCM  
+					fwrite(out_buffer_audio, 1, out_buffer_size, pFile);  
+#endif  
+					index++;  
+					}  
+  
+#if USE_SDL  
+					while(audio_len>0)//Wait until finish  
+						SDL_Delay(1);   
+  
+					//Set audio buffer (PCM data)  
+					audio_chunk = (Uint8 *) out_buffer_audio;   
+					//Audio buffer length  
+					audio_len =out_buffer_size;  
+					audio_pos = audio_chunk;  
+  
+					//Play  
+					SDL_PauseAudio(0);  
+#endif  
+				} 
                 av_free_packet(packet);  
             }
 			else
@@ -417,17 +559,37 @@ void* playeropen(char *file)
         }  
   
     }  
+	//Free vodeo's swresample
+	swr_free(&au_convert_ctx);  
+	//Free audio's swsscale
 	sws_freeContext(img_convert_ctx);  
 	
-    printf("SDL: SDL_Quit success\n"); 
-    SDL_Quit();  
-    //--------------  
+#if USE_SDL  
+	//Close SDL  
+    SDL_CloseAudio();
+    printf("SDL: SDL_CloseAudio success\n"); 
+    SDL_Quit(); 
+	printf("SDL: SDL_Quit success\n"); 	
+#endif  
+    //Close file  
+#if OUTPUT_PCM  
+    fclose(pFile);  
+#endif  
+	//Free Memory  Resource
+	av_free(out_buffer_audio);  
+	av_free(out_buffer); 
     av_frame_free(&pFrameYUV);  
     av_frame_free(&pFrame);  
+	av_frame_free(&pFrameYUV_a);  
+    av_frame_free(&pFrame_a); 
+	// Close the video codec 
 	avcodec_close(player->pVideoCodecContext);  
+	// Close the audio codec 
+    avcodec_close(player->pAudioCodecContext); 
+	// Close the video file  
     avformat_close_input(&player->pAVFormatContext);  
 	
-	return player;
+	return 0;
 	error_handler:
 		//playerclose(player);
 		return NULL;
