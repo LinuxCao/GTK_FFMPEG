@@ -50,6 +50,7 @@ gboolean no_seek = FALSE;
 
 // 全局变量定义
 //static void *g_hplayer = NULL;
+static 	PLAYER *player   = NULL;
 
 //Refresh Event  
 #define SFM_REFRESH_EVENT  (SDL_USEREVENT + 1)  
@@ -64,7 +65,7 @@ gboolean no_seek = FALSE;
   
 int thread_exit=0;  
 int thread_pause=0;  
-pthread_t pthread_player_open;
+
 
 //Buffer:  
 //|-----------|-------------|  
@@ -175,41 +176,15 @@ gboolean pktqueue_create(PKTQUEUE *ppq)
 
   
  // 函数实现
-void* playeropen(char *file)
+void* playeropen(const gchar *file)
 {
-    PLAYER        *player   = NULL;
-    AVCodec       *pAVCodec = NULL;
-	AVFrame *pFrame,*pFrameYUV;  
-	AVFrame *pFrame_a,*pFrameYUV_a;
-	AVPacket *packet;  
-    int            vformat  = 0;
-    int            width    = 0;
-    int            height   = 0;
-    //AVRational     vrate    = {1, 1};
-    uint64_t       alayout  = 0;
-    int            aformat  = 0;
-    int            arate    = 0;
-    uint32_t       i        = 0;
-	uint8_t *out_buffer;  
-	uint8_t *out_buffer_audio; 
-	struct SwsContext *img_convert_ctx;
-	struct SwrContext *au_convert_ctx; 
-	int ret, got_picture,got_picture_audio;  
-	FILE *pFile=NULL; 
-	int64_t in_channel_layout;  
-	int index = 0;  
-	
-	//SDL---------------------------  
-    int screen_w=0,screen_h=0;  
-    SDL_Window *screen;   
-    SDL_Renderer* sdlRenderer;  
-    SDL_Texture* sdlTexture;  
-    SDL_Rect sdlRect; 
-	//SDL_Thread *video_tid;  
-    SDL_Event event;  
-	SDL_AudioSpec wanted_spec;  
-
 	g_print("playeropen\n"); 
+	
+    AVCodec       *pAVCodec = NULL;
+    uint32_t       i        = 0;
+
+
+
     // av register all
 	g_print("av_register_all success\n"); 
     av_register_all();
@@ -289,7 +264,7 @@ void* playeropen(char *file)
         else player->iAudioStreamIndex = -1;
     }
 
-	 // open video codec
+	// open video codec
 	g_print("open video codec\n"); 
     if (player->iVideoStreamIndex != -1)
     {
@@ -309,287 +284,12 @@ void* playeropen(char *file)
         else player->iVideoStreamIndex = -1;
     }
 	
-	// for video
-    if (player->iVideoStreamIndex != -1)
-    {
-		vformat = player->pVideoCodecContext->pix_fmt;
-		width   = player->pVideoCodecContext->width;
-		height  = player->pVideoCodecContext->height;
-		g_print("player->pVideoCodecContext->pix_fmt = %d\n",vformat);
-		g_print("player->pVideoCodecContext->width = %d\n",width);
-		g_print("player->pVideoCodecContext->height = %d\n",height);
-    }
-
-	// for audio
-    if (player->iVideoStreamIndex != -1)
-    {
-		alayout = player->pAudioCodecContext->channel_layout;
-        aformat = player->pAudioCodecContext->sample_fmt;
-        arate   = player->pAudioCodecContext->sample_rate;
-		g_print("player->pAudioCodecContext->channel_layout = %lu\n",alayout);
-		g_print("player->pAudioCodecContext->sample_fmt = %d\n",aformat);
-		g_print("player->pAudioCodecContext->sample_rate = %d\n",arate);
-		g_print("player->pAudioCodecContext->channels = %d\n",player->pAudioCodecContext->channels);
-	
-    }
-	
-#if OUTPUT_PCM  
-    pFile=fopen("output.pcm", "wb");  
-#endif  
-
-	//init packet
-    packet=(AVPacket *)av_malloc(sizeof(AVPacket));  
-    av_init_packet(packet);  
-	
-	//init video Frame
-	pFrame=av_frame_alloc();  
-    pFrameYUV=av_frame_alloc();
-	
-	//init audio Frame
-	pFrame_a = av_frame_alloc();
-    pFrameYUV_a = av_frame_alloc();
-	
-	//Out Audio Param  
-    uint64_t out_channel_layout=AV_CH_LAYOUT_STEREO;  
-    //nb_samples: AAC-1024 MP3-1152  
-    int out_nb_samples=player->pAudioCodecContext->frame_size;  
-    //AVSampleFormat out_sample_fmt=AV_SAMPLE_FMT_S16;  
-	int out_sample_fmt=1;
-    int out_sample_rate=44100;  
-    int out_channels=av_get_channel_layout_nb_channels(out_channel_layout);  
-	
-    //Out Audio Buffer Size  
-    int out_buffer_size=av_samples_get_buffer_size(NULL,out_channels ,out_nb_samples,out_sample_fmt, 1);  
-	out_buffer_audio=(uint8_t *)av_malloc(MAX_AUDIO_FRAME_SIZE*2);  
-	
-	out_buffer=(uint8_t *)av_malloc(avpicture_get_size(PIX_FMT_YUV420P, width, height));  
-	avpicture_fill((AVPicture *)pFrameYUV, out_buffer, PIX_FMT_YUV420P, width, height);  
-	
-	//Output Info-----------------------------  
+	// Output Info-----------------------------  
 	printf("--------------- File Information ----------------\n");  
 	av_dump_format(player->pAVFormatContext,0,file,0);  
 	printf("-------------------------------------------------\n"); 
-
-  
-//SDL------------------  
-#if USE_SDL  
-    //Init  
-	if(SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_TIMER)) 
-	{    
-		printf( "Could not initialize SDL - %s\n", SDL_GetError());   
-		return NULL;  
-	}   
-	else
-	{
-		printf( "SDL: SDL_Init success\n");   
-	}
-    //SDL_AudioSpec  
-    wanted_spec.freq = out_sample_rate;   
-    wanted_spec.format = AUDIO_S16SYS;   
-    wanted_spec.channels = out_channels;   
-    wanted_spec.silence = 0;   
-    wanted_spec.samples = out_nb_samples;   
-    wanted_spec.callback = fill_audio;   
-    wanted_spec.userdata = player->pAudioCodecContext;   
-  
-    if (SDL_OpenAudio(&wanted_spec, NULL)<0)
-	{   
-        printf("can't open audio.\n");   
-        return NULL;   
-    }  
-	else
-	{
-		printf( "SDL: SDL_OpenAudio success\n");  
-	}
-#endif  
-
-	//FIX:Some Codec's Context Information is missing  
-	g_print("av_get_default_channel_layout\n");	
-    in_channel_layout=av_get_default_channel_layout(player->pAudioCodecContext->channels);
-	g_print("av_get_default_channel_layout:%lu\n",in_channel_layout);	
 	
-	//Swresample for audio
-	au_convert_ctx = swr_alloc();  
-    au_convert_ctx=swr_alloc_set_opts(au_convert_ctx,out_channel_layout, out_sample_fmt, out_sample_rate,  
-        in_channel_layout,player->pAudioCodecContext->sample_fmt , player->pAudioCodecContext->sample_rate,0, NULL);  
-    swr_init(au_convert_ctx);  
-	
-	//Swscale for video
-	img_convert_ctx = sws_getContext(width, height, vformat,   
-        width, height, PIX_FMT_YUV420P, SWS_BICUBIC, NULL, NULL, NULL);  
-
-	screen_w = player->pVideoCodecContext->width;  
-    screen_h = player->pVideoCodecContext->height; 
-	//SDL 2.0 Support for multiple windows  
-    screen = SDL_CreateWindow("ffmpeg player's Window", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,  
-        screen_w, screen_h,  
-        SDL_WINDOW_OPENGL); 
-	if(!screen)
-	{    
-        printf("SDL: could not create window - exiting:%s\n",SDL_GetError());    
-        return NULL;  
-    }  
-	else
-	{
-	    printf("SDL: SDL_CreateWindow success\n");    
-	}
-	sdlRenderer = SDL_CreateRenderer(screen, -1, 0);  
-	if(!sdlRenderer)
-	{    
-        printf("SDL: could not create Renderer - exiting:%s\n",SDL_GetError());    
-        return NULL;  
-    }  
-	else
-	{
-	    printf("SDL: SDL_CreateRenderer success\n");    
-	}	
-    //IYUV: Y + U + V  (3 planes)  
-    //YV12: Y + V + U  (3 planes)  
-    sdlTexture = SDL_CreateTexture(sdlRenderer, 
-								   SDL_PIXELFORMAT_IYUV, 
-								   SDL_TEXTUREACCESS_STREAMING,
-								   player->pVideoCodecContext->width,
-								   player->pVideoCodecContext->height);
-	if(!sdlTexture)
-	{    
-        printf("SDL: could not create Texture - exiting:%s\n",SDL_GetError());    
-        return NULL;  
-    }  
-	else
-	{
-	    printf("SDL: SDL_CreateTexture success\n");    
-	}				
-
-	sdlRect.x=0;  
-    sdlRect.y=0;  
-    sdlRect.w=screen_w;  
-    sdlRect.h=screen_h;  
-	
-	SDL_CreateThread(sfp_refresh_thread,NULL,NULL);  
-	//------------SDL End------------  
-    //Event Loop  
-	
-	for (;;) 
-	{  
-        //Wait  
-        SDL_WaitEvent(&event);  
-        if(event.type==SFM_REFRESH_EVENT)
-		{  
-            //------------------------------  
-            if(av_read_frame(player->pAVFormatContext, packet)>=0)
-			{  
-                if(packet->stream_index==player->iVideoStreamIndex)
-				{  
-                    ret = avcodec_decode_video2(player->pVideoCodecContext, pFrame, &got_picture, packet);  
-                    if(ret < 0)
-					{  
-                        printf("avcodec_decode_video2 Error.\n");  
-                        return NULL;  
-                    }  
-                    if(got_picture)
-					{  
-                        sws_scale(img_convert_ctx, (const uint8_t* const*)pFrame->data, pFrame->linesize, 0, player->pVideoCodecContext->height, pFrameYUV->data, pFrameYUV->linesize);  
-                        //SDL---------------------------  
-                        SDL_UpdateTexture( sdlTexture, NULL, pFrameYUV->data[0], pFrameYUV->linesize[0] );    
-                        SDL_RenderClear( sdlRenderer );    
-                        //SDL_RenderCopy( sdlRenderer, sdlTexture, &sdlRect, &sdlRect );    
-                        SDL_RenderCopy( sdlRenderer, sdlTexture, NULL, NULL);    
-                        SDL_RenderPresent( sdlRenderer );    
-                        //SDL End-----------------------  
-                    }  
-                }  
-				else if(packet->stream_index==player->iAudioStreamIndex)
-				{  
-					ret = avcodec_decode_audio4( player->pAudioCodecContext, pFrame_a,&got_picture_audio, packet);  
-					if ( ret < 0 )
-					{  
-						printf("Error in decoding audio frame.\n");  
-						return NULL;  
-					}  
-					if ( got_picture_audio > 0 )
-					{  
-						swr_convert(au_convert_ctx,&out_buffer_audio, MAX_AUDIO_FRAME_SIZE,(const uint8_t **)pFrame_a->data , pFrame_a->nb_samples);  
-#if 0  
-						printf("index:%5d\t pts:%lld\t packet size:%d\n",index,packet->pts,packet->size);  
-#endif  
-  
-  
-#if OUTPUT_PCM  
-					//Write PCM  
-					fwrite(out_buffer_audio, 1, out_buffer_size, pFile);  
-#endif  
-					index++;  
-					}  
-  
-#if USE_SDL  
-					while(audio_len>0)//Wait until finish  
-						SDL_Delay(1);   
-  
-					//Set audio buffer (PCM data)  
-					audio_chunk = (Uint8 *) out_buffer_audio;   
-					//Audio buffer length  
-					audio_len =out_buffer_size;  
-					audio_pos = audio_chunk;  
-  
-					//Play  
-					SDL_PauseAudio(0);  
-#endif  
-				} 
-                av_free_packet(packet);  
-            }
-			else
-			{  
-                //Exit Thread  
-                thread_exit=1;  
-            }  
-        }
-		else if(event.type==SDL_KEYDOWN)
-		{  
-            //Pause  
-            if(event.key.keysym.sym==SDLK_SPACE)  
-                thread_pause=!thread_pause;  
-        }
-		else if(event.type==SDL_QUIT)
-		{  
-            thread_exit=1;  
-        }
-		else if(event.type==SFM_BREAK_EVENT)
-		{  
-            break;  
-        }  
-  
-    }  
-	//Free vodeo's swresample
-	swr_free(&au_convert_ctx);  
-	//Free audio's swsscale
-	sws_freeContext(img_convert_ctx);  
-	
-#if USE_SDL  
-	//Close SDL  
-    SDL_CloseAudio();
-    printf("SDL: SDL_CloseAudio success\n"); 
-    SDL_Quit(); 
-	printf("SDL: SDL_Quit success\n"); 	
-#endif  
-    //Close file  
-#if OUTPUT_PCM  
-    fclose(pFile);  
-#endif  
-	//Free Memory  Resource
-	av_free(out_buffer_audio);  
-	av_free(out_buffer); 
-    av_frame_free(&pFrameYUV);  
-    av_frame_free(&pFrame);  
-	av_frame_free(&pFrameYUV_a);  
-    av_frame_free(&pFrame_a); 
-	// Close the video codec 
-	avcodec_close(player->pVideoCodecContext);  
-	// Close the audio codec 
-    avcodec_close(player->pAudioCodecContext); 
-	// Close the video file  
-    avformat_close_input(&player->pAVFormatContext);  
-	
-	return 0;
+	return TRUE;
 	error_handler:
 		//playerclose(player);
 		return NULL;
@@ -615,10 +315,11 @@ static void file_open(GtkAction *action)
 		// g_signal_emit_by_name(G_OBJECT(stop_button), "clicked");  
 		if (current_filename) g_free(current_filename);  
 		current_filename = filename;  
-
-		// player open file pthread
-		pthread_create(&pthread_player_open,NULL,playeropen,current_filename);
-		gtk_widget_set_sensitive(GTK_WIDGET(play_button), TRUE);  
+		//load file 
+        if (load_file(filename))  
+		{
+            gtk_widget_set_sensitive(GTK_WIDGET(play_button), TRUE);  
+		}
 	}
 	gtk_widget_destroy(file_chooser);
 }  
@@ -673,15 +374,17 @@ static GtkActionEntry mainwindow_action_entries[] = {
 static void play_clicked(GtkWidget *widget, gpointer data)  
 {  
 	g_print("play_clicked\n"); 
+
 	if (current_filename) 
 	{  
 		if (play_file())
 		{  
 			gtk_widget_set_sensitive(GTK_WIDGET(stop_button), TRUE);  
 			gtk_widget_set_sensitive(GTK_WIDGET(pause_button), TRUE);  
-			// g_print("Play was pressed\n");    
+			gtk_widget_set_sensitive(GTK_WIDGET(play_button), FALSE); 
+			g_print("gui_status_update(STATE_PLAY)\n");    
 			gui_status_update(STATE_PLAY);  
-			g_print("Play\n");    
+			g_print("Play success\n");    
 		}  
 		else 
 		{  
@@ -849,14 +552,16 @@ static gboolean build_gstreamer_pipeline(const gchar *uri)
    return TRUE;
 }  
 */
-/*
+
 // load file to play  
 gboolean load_file(const gchar *uri)  
 {  
 	g_print("load_file\n"); 
-	return TRUE;
+	if(playeropen(uri))
+		return TRUE;
+	return FALSE;
 }  
-*/
+
 /*
 static gboolean update_time_callback(GstElement *pipeline)  
 {  
@@ -866,6 +571,334 @@ static gboolean update_time_callback(GstElement *pipeline)
 gboolean play_file()  
 {  
 	g_print("play_file\n"); 
+	
+	//video
+	AVPacket *packet;  
+	AVFrame *pFrame,*pFrameYUV;  
+	uint8_t *out_buffer;  
+	struct SwsContext *img_convert_ctx;
+	int vformat = 0;
+	int width = 0;
+	int height = 0;
+	int ret = 0;
+	int got_picture = 0;
+	
+	//audio	
+	AVFrame *pFrame_a;
+	FILE *pFile=NULL; 
+	uint8_t *out_buffer_audio; 
+	int64_t in_channel_layout;  
+    struct SwrContext *au_convert_ctx;  
+    int index = 0; 
+	uint64_t alayout = 0;
+	int	aformat = 0;
+	int arate = 0;
+	int got_picture_audio = 0;
+	
+	//SDL---------------------------  
+    int screen_w=0,screen_h=0;  
+    SDL_Window *screen;   
+    SDL_Renderer* sdlRenderer;  
+    SDL_Texture* sdlTexture;  
+	SDL_Thread *video_tid;  
+    SDL_Event event;  
+    SDL_AudioSpec wanted_spec;  
+	
+	// for video
+    if (player->iVideoStreamIndex != -1)
+    {
+		vformat = player->pVideoCodecContext->pix_fmt;
+		width   = player->pVideoCodecContext->width;
+		height  = player->pVideoCodecContext->height;
+		g_print("player->pVideoCodecContext->pix_fmt = %d\n",vformat);
+		g_print("player->pVideoCodecContext->width = %d\n",width);
+		g_print("player->pVideoCodecContext->height = %d\n",height);
+    }
+
+	// for audio
+    if (player->iVideoStreamIndex != -1)
+    {
+		alayout = player->pAudioCodecContext->channel_layout;
+        aformat = player->pAudioCodecContext->sample_fmt;
+        arate   = player->pAudioCodecContext->sample_rate;
+		g_print("player->pAudioCodecContext->channel_layout = %lu\n",alayout);
+		g_print("player->pAudioCodecContext->sample_fmt = %d\n",aformat);
+		g_print("player->pAudioCodecContext->sample_rate = %d\n",arate);
+		g_print("player->pAudioCodecContext->channels = %d\n",player->pAudioCodecContext->channels);
+	
+    }
+	//Init Info-----------------------------  
+	printf("--------------- Init Information ----------------\n");  
+	
+#if OUTPUT_PCM  
+    pFile=fopen("output.pcm", "wb");  
+#endif  
+
+	//init packet
+    packet=(AVPacket *)av_malloc(sizeof(AVPacket));  
+    av_init_packet(packet); 
+	
+	//init Frame for video
+	pFrame=av_frame_alloc();  
+    pFrameYUV=av_frame_alloc();
+	
+	//init Frame for audio
+	pFrame_a = av_frame_alloc();
+	
+	//Init Param for audio
+    uint64_t out_channel_layout=AV_CH_LAYOUT_STEREO;  
+    //nb_samples: AAC-1024 MP3-1152  
+    int out_nb_samples=player->pAudioCodecContext->frame_size;  
+    //AVSampleFormat out_sample_fmt=AV_SAMPLE_FMT_S16;  
+	int out_sample_fmt=1;
+    int out_sample_rate=44100;  
+    int out_channels=av_get_channel_layout_nb_channels(out_channel_layout);  
+	in_channel_layout=av_get_default_channel_layout(player->pAudioCodecContext->channels);
+	
+   //Init SDL_AudioSpec param for audio
+    wanted_spec.freq = out_sample_rate;   
+    wanted_spec.format = AUDIO_S16SYS;   
+    wanted_spec.channels = out_channels;   
+    wanted_spec.silence = 0;   
+    wanted_spec.samples = out_nb_samples;   
+    wanted_spec.callback = fill_audio;   
+    wanted_spec.userdata = player->pAudioCodecContext;  
+	
+	//init out_buffer for video
+	out_buffer=(uint8_t *)av_malloc(avpicture_get_size(PIX_FMT_YUV420P, width, height));  
+	avpicture_fill((AVPicture *)pFrameYUV, out_buffer, PIX_FMT_YUV420P, width, height);  
+	
+	//init out_buffer_audio for audio
+    int out_buffer_size=av_samples_get_buffer_size(NULL,out_channels ,out_nb_samples,out_sample_fmt, 1);  
+	out_buffer_audio=(uint8_t *)av_malloc(MAX_AUDIO_FRAME_SIZE*2);  
+	
+	//Swscale for video
+	img_convert_ctx = sws_getContext(width,
+									 height,
+									 vformat,   
+									 width,
+									 height, 
+									 PIX_FMT_YUV420P, 
+									 SWS_BICUBIC, NULL, NULL, NULL);  
+		
+	//Swresample for audio
+	au_convert_ctx = swr_alloc();  
+    au_convert_ctx=swr_alloc_set_opts(au_convert_ctx,
+									  out_channel_layout, 
+									  out_sample_fmt, 
+									  out_sample_rate,  
+									  in_channel_layout,
+									  player->pAudioCodecContext->sample_fmt ,
+									  player->pAudioCodecContext->sample_rate,0, NULL);  
+    swr_init(au_convert_ctx);  
+	
+	printf("--------------- Init SDL ----------------\n");  
+	//SDL_Init
+	if(SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_TIMER)) 
+	{    
+		printf( "Could not initialize SDL - %s\n", SDL_GetError());   
+		return NULL;  
+	}   
+	else
+	{
+		printf( "SDL: SDL_Init success\n");   
+	}
+	
+	//SDL_OpenAudio
+	if (SDL_OpenAudio(&wanted_spec, NULL)<0)
+	{   
+        printf("can't open audio.\n");   
+        return NULL;   
+    }  
+	else
+	{
+		printf( "SDL: SDL_OpenAudio success\n");  
+	}
+	
+	//SDL_CreateWindow
+	screen_w = player->pVideoCodecContext->width;  
+    screen_h = player->pVideoCodecContext->height; 
+    screen = SDL_CreateWindow("ffmpeg player's Window", 
+							  SDL_WINDOWPOS_UNDEFINED, 
+							  SDL_WINDOWPOS_UNDEFINED,  
+							  screen_w, 
+							  screen_h,  
+							  SDL_WINDOW_OPENGL); 
+	if(!screen)
+	{    
+        printf("SDL: could not create window - exiting:%s\n",SDL_GetError());    
+        return NULL;  
+    }  
+	else
+	{
+	    printf("SDL: SDL_CreateWindow success\n");    
+	}
+	
+	//SDL_CreateRenderer
+	sdlRenderer = SDL_CreateRenderer(screen, -1, 0);  
+	if(!sdlRenderer)
+	{    
+        printf("SDL: could not create Renderer - exiting:%s\n",SDL_GetError());    
+        return NULL;  
+    }  
+	else
+	{
+	    printf("SDL: SDL_CreateRenderer success\n");    
+	}	
+    //IYUV: Y + U + V  (3 planes)  
+    //YV12: Y + V + U  (3 planes)  
+	//SDL_CreateRenderer
+    sdlTexture = SDL_CreateTexture(sdlRenderer, 
+								   SDL_PIXELFORMAT_IYUV, 
+								   SDL_TEXTUREACCESS_STREAMING,
+								   screen_w,
+								   screen_h);
+	if(!sdlTexture)
+	{    
+        printf("SDL: could not create Texture - exiting:%s\n",SDL_GetError());    
+        return NULL;  
+    }  
+	else
+	{
+	    printf("SDL: SDL_CreateTexture success\n");    
+	}	
+	
+	//SDL_CreateThread for refresh video
+	video_tid = SDL_CreateThread(sfp_refresh_thread,"refresh video",NULL);  
+	if(NULL == video_tid)
+	{
+		printf("SDL_CreateThread failed: %s\n", SDL_GetError());
+	}
+	else
+	{
+		printf("SDL: SDL_CreateThread success\n");
+	}
+		
+	printf("-------------------------------------------------\n"); 
+	
+	//Event Loop  
+	for (;;) 
+	{  
+        //Wait  decodec and show 
+        SDL_WaitEvent(&event);  
+        if(event.type==SFM_REFRESH_EVENT)
+		{  
+            //------------------------------  
+            if(av_read_frame(player->pAVFormatContext, packet)>=0)
+			{  
+                if(packet->stream_index==player->iVideoStreamIndex)
+				{  
+                    ret = avcodec_decode_video2(player->pVideoCodecContext, pFrame, &got_picture, packet);  
+                    if(ret < 0)
+					{  
+                        printf("avcodec_decode_video2 Error.\n");  
+                        return NULL;  
+                    }  
+                    if(got_picture)
+					{  
+                        sws_scale(img_convert_ctx, (const uint8_t* const*)pFrame->data, pFrame->linesize, 0, player->pVideoCodecContext->height, pFrameYUV->data, pFrameYUV->linesize);  
+                        //SDL---------------------------  
+                        SDL_UpdateTexture( sdlTexture, NULL, pFrameYUV->data[0], pFrameYUV->linesize[0] );    
+                        SDL_RenderClear( sdlRenderer );    
+                        //SDL_RenderCopy( sdlRenderer, sdlTexture, &sdlRect, &sdlRect );    
+                        SDL_RenderCopy( sdlRenderer, sdlTexture, NULL, NULL);    
+                        SDL_RenderPresent( sdlRenderer );    
+                        //SDL End-----------------------  
+                    }  
+                }  
+				else if(packet->stream_index==player->iAudioStreamIndex)
+				{  
+					ret = avcodec_decode_audio4( player->pAudioCodecContext, pFrame_a,&got_picture_audio, packet);  
+					if ( ret < 0 )
+					{  
+						printf("Error in decoding audio frame.\n");  
+						return NULL;  
+					}  
+					if ( got_picture_audio > 0 )
+					{  
+						swr_convert(au_convert_ctx,&out_buffer_audio, MAX_AUDIO_FRAME_SIZE,(const uint8_t **)pFrame_a->data , pFrame_a->nb_samples);  
+#if 0 
+						printf("index:%5d\t pts:%ld\t packet size:%d\n",index,packet->pts,packet->size);  
+#endif  
+  
+#if OUTPUT_PCM  
+						//Write PCM  
+						fwrite(out_buffer_audio, 1, out_buffer_size, pFile);  
+#endif  
+						index++;  
+					}  
+
+					while(audio_len>0)//Wait until finish  
+						SDL_Delay(1);   
+  
+					//Set audio buffer (PCM data)  
+					audio_chunk = (Uint8 *) out_buffer_audio;   
+					//Audio buffer length  
+					audio_len =out_buffer_size;  
+					audio_pos = audio_chunk;  
+					//Play  
+					SDL_PauseAudio(0);  
+				} 
+                av_free_packet(packet);  
+            }
+			else
+			{  
+                //Exit Thread  
+                thread_exit=1;  
+            }  
+        }
+		else if(event.type==SDL_KEYDOWN)
+		{  
+            //Pause  
+            if(event.key.keysym.sym==SDLK_SPACE)  
+                thread_pause=!thread_pause;  
+        }
+		else if(event.type==SDL_QUIT)
+		{  
+            thread_exit=1;  
+        }
+		else if(event.type==SFM_BREAK_EVENT)
+		{  
+            break;  
+        }  
+  
+    }  
+	
+	printf("--------------- free resource ----------------\n");  
+	
+	//Free vodeo's swsscale
+	sws_freeContext(img_convert_ctx); 
+	//Free audio's swresample	
+	swr_free(&au_convert_ctx); 
+	
+	//SDL_CloseAudio
+	printf("SDL: SDL_CloseAudio\n"); 	
+    SDL_CloseAudio();	
+	
+	//SDL_Quit
+	printf("SDL: SDL_Quit\n"); 	
+    SDL_Quit();
+	
+	//Close file  
+#if OUTPUT_PCM  
+    fclose(pFile);  
+#endif  
+
+	//Free Memory  Resource 
+	av_free(out_buffer); 
+	av_free(out_buffer_audio);  
+    av_frame_free(&pFrameYUV);  
+    av_frame_free(&pFrame);
+    av_frame_free(&pFrame_a); 	
+	// Close the video codec 
+	avcodec_close(player->pVideoCodecContext);  
+	// Close the audio codec 
+    avcodec_close(player->pAudioCodecContext); 
+	// Close the video file  
+    avformat_close_input(&player->pAVFormatContext);  
+	
+	printf("-----------------------------------------------\n");  
+
 	return TRUE;
 }  
   
